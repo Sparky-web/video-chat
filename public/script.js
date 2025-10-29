@@ -6,6 +6,7 @@ class VideoChat {
     this.peerConnection = null;
     this.isVideoEnabled = true;
     this.isAudioEnabled = true;
+    this.isInitiator = false;
 
     // WebRTC configuration
     this.config = {
@@ -51,12 +52,29 @@ class VideoChat {
       this.showStatus("Успешно подключились к чату!", "success");
       this.initializeMedia();
       this.updateConnectionStatus(data.userCount);
+
+      // Первый пользователь становится инициатором
+      if (data.userCount === 1) {
+        this.isInitiator = true;
+        console.log("Я инициатор соединения");
+      }
     });
 
     this.socket.on("user-joined", (data) => {
       this.updateConnectionStatus(data.userCount);
       if (data.userCount === 2) {
-        this.createOffer();
+        console.log("Второй пользователь присоединился");
+        // Инициатор создает предложение после небольшой задержки
+        if (this.isInitiator) {
+          setTimeout(() => {
+            console.log("Инициатор создает предложение");
+            this.startCall();
+          }, 1500);
+        } else {
+          // Второй пользователь готовится принять предложение
+          console.log("Готов принять предложение");
+          this.prepareForCall();
+        }
       }
     });
 
@@ -66,14 +84,17 @@ class VideoChat {
     });
 
     this.socket.on("offer", async (data) => {
+      console.log("Получено предложение");
       await this.handleOffer(data.offer);
     });
 
     this.socket.on("answer", async (data) => {
+      console.log("Получен ответ");
       await this.handleAnswer(data.answer);
     });
 
     this.socket.on("ice-candidate", async (data) => {
+      console.log("Получен ICE кандидат");
       await this.handleIceCandidate(data.candidate);
     });
 
@@ -107,6 +128,12 @@ class VideoChat {
       this.localVideo.srcObject = this.localStream;
       this.joinForm.style.display = "none";
       this.videoContainer.style.display = "block";
+
+      // Apply fullscreen styles
+      document.body.classList.add("video-active");
+      document.querySelector(".container").classList.add("fullscreen");
+
+      console.log("Медиа инициализировано");
     } catch (error) {
       console.error("Ошибка доступа к медиа устройствам:", error);
       this.showStatus(
@@ -118,25 +145,40 @@ class VideoChat {
   }
 
   createPeerConnection() {
+    console.log("Создание peer connection");
     this.peerConnection = new RTCPeerConnection(this.config);
 
     // Add local stream tracks to peer connection
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => {
         this.peerConnection.addTrack(track, this.localStream);
+        console.log("Добавлен локальный трек:", track.kind);
       });
     }
 
     // Handle remote stream
     this.peerConnection.ontrack = (event) => {
-      this.remoteStream = event.streams[0];
-      this.remoteVideo.srcObject = this.remoteStream;
+      console.log("Получен удаленный трек:", event.track.kind);
+      if (event.streams && event.streams[0]) {
+        this.remoteStream = event.streams[0];
+        this.remoteVideo.srcObject = this.remoteStream;
+
+        // Ensure video plays
+        this.remoteVideo.play().catch((e) => {
+          console.log("Автовоспроизведение заблокировано:", e);
+        });
+
+        console.log("Удаленное видео установлено");
+      }
     };
 
     // Handle ICE candidates
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
         this.socket.emit("ice-candidate", { candidate: event.candidate });
+        console.log("ICE кандидат отправлен");
+      } else {
+        console.log("Все ICE кандидаты отправлены");
       }
     };
 
@@ -151,36 +193,90 @@ class VideoChat {
         this.connectionStatus.className = "status error";
       }
     };
+
+    // Additional debugging
+    this.peerConnection.oniceconnectionstatechange = () => {
+      console.log("ICE состояние:", this.peerConnection.iceConnectionState);
+    };
+
+    this.peerConnection.onsignalingstatechange = () => {
+      console.log("Signaling состояние:", this.peerConnection.signalingState);
+    };
   }
 
-  async createOffer() {
+  async startCall() {
+    console.log("Начинаем звонок (создаем предложение)");
+    if (!this.localStream) {
+      console.error("Нет локального потока для создания предложения");
+      return;
+    }
+
     this.createPeerConnection();
 
     try {
-      const offer = await this.peerConnection.createOffer();
+      const offer = await this.peerConnection.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      });
       await this.peerConnection.setLocalDescription(offer);
       this.socket.emit("offer", { offer });
+      console.log("Предложение отправлено");
     } catch (error) {
       console.error("Ошибка создания предложения:", error);
     }
   }
 
-  async handleOffer(offer) {
+  async prepareForCall() {
+    console.log("Подготовка к принятию звонка");
+    if (!this.localStream) {
+      console.error("Нет локального потока для подготовки к звонку");
+      return;
+    }
+    // Создаем peer connection заранее
     this.createPeerConnection();
+  }
+
+  async handleOffer(offer) {
+    console.log("Обработка предложения");
+    if (!this.localStream) {
+      console.error("Нет локального потока для обработки предложения");
+      return;
+    }
+
+    if (!this.peerConnection) {
+      this.createPeerConnection();
+    }
 
     try {
-      await this.peerConnection.setRemoteDescription(offer);
-      const answer = await this.peerConnection.createAnswer();
+      await this.peerConnection.setRemoteDescription(
+        new RTCSessionDescription(offer)
+      );
+      console.log("Remote description установлен");
+
+      const answer = await this.peerConnection.createAnswer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      });
       await this.peerConnection.setLocalDescription(answer);
       this.socket.emit("answer", { answer });
+      console.log("Ответ отправлен");
     } catch (error) {
       console.error("Ошибка обработки предложения:", error);
     }
   }
 
   async handleAnswer(answer) {
+    console.log("Обработка ответа");
     try {
-      await this.peerConnection.setRemoteDescription(answer);
+      if (
+        this.peerConnection &&
+        this.peerConnection.signalingState !== "stable"
+      ) {
+        await this.peerConnection.setRemoteDescription(
+          new RTCSessionDescription(answer)
+        );
+        console.log("Ответ получен и обработан");
+      }
     } catch (error) {
       console.error("Ошибка обработки ответа:", error);
     }
@@ -188,8 +284,13 @@ class VideoChat {
 
   async handleIceCandidate(candidate) {
     try {
-      if (this.peerConnection) {
-        await this.peerConnection.addIceCandidate(candidate);
+      if (this.peerConnection && this.peerConnection.remoteDescription) {
+        await this.peerConnection.addIceCandidate(
+          new RTCIceCandidate(candidate)
+        );
+        console.log("ICE кандидат добавлен");
+      } else {
+        console.log("Отложен ICE кандидат - нет remote description");
       }
     } catch (error) {
       console.error("Ошибка обработки ICE кандидата:", error);
@@ -240,7 +341,8 @@ class VideoChat {
     document.body.classList.remove("video-active");
     document.querySelector(".container").classList.remove("fullscreen");
 
-    // Reset button states
+    // Reset states
+    this.isInitiator = false;
     this.isVideoEnabled = true;
     this.isAudioEnabled = true;
     this.toggleVideoBtn.textContent = "📹";
@@ -257,6 +359,7 @@ class VideoChat {
     if (this.remoteVideo.srcObject) {
       this.remoteVideo.srcObject = null;
     }
+    this.remoteStream = null;
   }
 
   showStatus(message, type) {
